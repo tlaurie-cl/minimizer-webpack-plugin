@@ -74,6 +74,7 @@ declare class TerserPlugin<T = import("terser").MinifyOptions> {
   /**
    * Every configured minimizer, in order. The `minify` option takes one or an
    * array; embedded source is dispatched across all of them either way.
+   * Module path values are resolved to functions for helpers (`getTypes`, …).
    * @private
    * @returns {(BasicMinimizerImplementation<EXPECTED_ANY> & MinimizeFunctionHelpers)[]} the minimizers
    */
@@ -274,6 +275,8 @@ declare namespace TerserPlugin {
     MinimizerOptions,
     BasicMinimizerImplementation,
     MinimizeFunctionHelpers,
+    ImplementationModuleRef,
+    MinimizerImplementationValue,
     MinimizerImplementation,
     InternalOptions,
     MinimizerWorker,
@@ -534,12 +537,21 @@ type MinimizeFunctionHelpers = {
   getEmbeddedTypes?:
     ((minimizerOptions?: EXPECTED_OBJECT) => string[] | undefined) | undefined;
 };
+/**
+ * Module path form of `minimizer.implementation` (like sass-loader): the worker
+ * `require`s it instead of evaluating serialized function source via `new Function`.
+ */
+type ImplementationModuleRef = {
+  path: string;
+  export?: string;
+};
+type MinimizerImplementationValue<T> =
+  | (BasicMinimizerImplementation<T> & MinimizeFunctionHelpers)
+  | string
+  | ImplementationModuleRef;
 type MinimizerImplementation<T> = T extends EXPECTED_ANY[]
-  ? {
-      [P in keyof T]: BasicMinimizerImplementation<T[P]> &
-        MinimizeFunctionHelpers;
-    }
-  : BasicMinimizerImplementation<T> & MinimizeFunctionHelpers;
+  ? { [P in keyof T]: MinimizerImplementationValue<T[P]> }
+  : MinimizerImplementationValue<T>;
 type InternalOptions<T> = {
   /**
    * name
@@ -565,7 +577,7 @@ type InternalOptions<T> = {
     options: MinimizerOptions<T>;
   };
   /**
-   * every configured minimizer, for source one language embeds in another: it carries no filename, so `minimizer` — which holds only what this asset's name matched — is not the set to dispatch it across. `claims` is the languages each minifies and `offers` the languages each can hand out, both as data and both parallel to `implementation`, since a minify function reaches a worker as source and carries none of its properties; `at` says which of them `minimizer` holds. Absent when no nested language is reachable at all
+   * every configured minimizer, for source one language embeds in another: it carries no filename, so `minimizer` — which holds only what this asset's name matched — is not the set to dispatch it across. `claims` / `offers` travel as data parallel to `implementation` so the legacy serialize path still knows what each entry minifies and can nest (a function shipped as source loses its helpers; a module path `require` restores them, but the arrays stay so both paths share one shape). `at` says which of them `minimizer` holds. Absent when no nested language is reachable at all
    */
   embedded?:
     | {

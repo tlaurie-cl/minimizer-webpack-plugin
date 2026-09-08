@@ -2,6 +2,11 @@
 /** @typedef {import("./index.js").CustomOptions} CustomOptions */
 /** @typedef {import("./index.js").RawSourceMap} RawSourceMap */
 /** @typedef {import("./index.js").EXPECTED_ANY} EXPECTED_ANY */
+/** @typedef {import("./index.js").MinimizeFunctionHelpers} MinimizeFunctionHelpers */
+/**
+ * A concrete minify function, including optional worker-path helpers.
+ * @typedef {import("./index.js").BasicMinimizerImplementation<CustomOptions> & MinimizeFunctionHelpers} MinimizerFn
+ */
 /**
  * @template T
  * @typedef {import("./index.js").MinimizerOptions<T>} MinimizerOptions
@@ -300,6 +305,176 @@ function composeSourceMaps(currentMap, prevMap, name) {
 /* eslint-enable prefer-destructuring, no-eq-null, eqeqeq */
 
 /**
+ * @typedef {import("./index.js").ImplementationModuleRef} ImplementationModuleRef
+ */
+
+/**
+ * What may sit in an `implementation` slot before `loadImplementation`.
+ * @typedef {MinimizerFn | ImplementationModuleRef | string} ImplementationSlot
+ */
+
+/**
+ * @param {unknown} implementation a minify function, module path, or path ref
+ * @returns {ImplementationModuleRef | undefined} how to `require` it in a worker
+ */
+function getImplementationModuleRef(implementation) {
+  if (typeof implementation === "string") {
+    return { path: implementation };
+  }
+
+  if (
+    implementation &&
+    typeof implementation === "object" &&
+    typeof (/** @type {ImplementationModuleRef} */ (implementation).path) ===
+      "string"
+  ) {
+    const ref = /** @type {ImplementationModuleRef} */ (implementation);
+
+    return typeof ref.export === "string" && ref.export.length > 0
+      ? { path: ref.path, export: ref.export }
+      : { path: ref.path };
+  }
+
+  return undefined;
+}
+
+/**
+ * @param {unknown} implementation a minify function, module path, or path ref
+ * @returns {MinimizerFn} the minify function
+ */
+function loadImplementation(implementation) {
+  if (typeof implementation === "function") {
+    return /** @type {MinimizerFn} */ (implementation);
+  }
+
+  const ref = getImplementationModuleRef(implementation);
+
+  if (!ref) {
+    throw new TypeError(
+      "Invalid minimizer implementation for worker path load",
+    );
+  }
+
+  const mod = require(ref.path);
+
+  const loaded =
+    typeof ref.export === "string"
+      ? mod[ref.export]
+      : typeof mod === "function"
+        ? mod
+        : mod && mod.default;
+
+  if (typeof loaded !== "function") {
+    throw new TypeError(
+      typeof ref.export === "string"
+        ? `Minimizer export "${ref.export}" is not a function in ${ref.path}`
+        : `Minimizer module does not export a function: ${ref.path}`,
+    );
+  }
+
+  return /** @type {MinimizerFn} */ (loaded);
+}
+
+/**
+ * @param {unknown} value value
+ * @returns {boolean} true when `value` is a `RegExp`
+ */
+function isRegExp(value) {
+  return Object.prototype.toString.call(value) === "[object RegExp]";
+}
+
+/**
+ * @param {unknown} extractComments extract comments option
+ * @param {{ allowRegExp?: boolean }=} ipc jest-worker IPC abilities
+ * @returns {boolean} true when it is safe for jest-worker `minify` IPC
+ */
+function canPassExtractCommentsWithoutSerialize(extractComments, ipc) {
+  const allowRegExp = Boolean(ipc && ipc.allowRegExp);
+
+  if (
+    typeof extractComments === "undefined" ||
+    typeof extractComments === "boolean" ||
+    typeof extractComments === "string"
+  ) {
+    return true;
+  }
+
+  if (typeof extractComments === "function") {
+    return false;
+  }
+
+  if (isRegExp(extractComments)) {
+    return allowRegExp;
+  }
+
+  if (typeof extractComments !== "object" || extractComments === null) {
+    return false;
+  }
+
+  const { condition, banner, filename } =
+    /** @type {{ condition?: unknown, banner?: unknown, filename?: unknown }} */ (
+      extractComments
+    );
+
+  if (typeof banner === "function" || typeof filename === "function") {
+    return false;
+  }
+
+  if (typeof condition === "function") {
+    return false;
+  }
+
+  if (isRegExp(condition)) {
+    return allowRegExp;
+  }
+
+  return true;
+}
+
+/**
+ * True when every `minimizer.implementation` is a module path (`string` or
+ * `{ path, export }`) and nothing else in the payload needs
+ * `serialize-javascript` / `new Function` (e.g. a function `extractComments`).
+ * `RegExp` extract comments round-trip under worker_threads structured clone,
+ * so they are allowed when `ipc.allowRegExp` is set. Inline minify functions
+ * keep the legacy `transform` path.
+ * @template T
+ * @param {import("./index.js").InternalOptions<T>} options options
+ * @param {{ allowRegExp?: boolean }=} ipc jest-worker IPC abilities
+ * @returns {boolean} whether `worker.minify` can run without `transform`
+ */
+function canMinifyByPath(options, ipc) {
+  if (!canPassExtractCommentsWithoutSerialize(options.extractComments, ipc)) {
+    return false;
+  }
+
+  /**
+   * @param {unknown} implementation implementation
+   * @returns {boolean} true when a module path is known
+   */
+  const hasPath = (implementation) =>
+    Boolean(getImplementationModuleRef(implementation));
+
+  const minimizers = Array.isArray(options.minimizer.implementation)
+    ? options.minimizer.implementation
+    : [options.minimizer.implementation];
+
+  if (!minimizers.every(hasPath)) {
+    return false;
+  }
+
+  if (!options.embedded) {
+    return true;
+  }
+
+  const embedded = Array.isArray(options.embedded.implementation)
+    ? options.embedded.implementation
+    : [options.embedded.implementation];
+
+  return embedded.every(hasPath);
+}
+
+/**
  * @template T
  * @param {import("./index.js").InternalOptions<T>} options options
  * @returns {Promise<MinimizedResult>} minified result
@@ -463,7 +638,7 @@ async function minify(options) {
   for (let i = 0; i < implementations.length; i++) {
     const currentImplementation =
       /** @type {import("./index.js").BasicMinimizerImplementation<T> & import("./index.js").MinimizeFunctionHelpers} */
-      (implementations[i]);
+      (loadImplementation(implementations[i]));
     const baseOptions =
       /** @type {import("./index.js").MinimizerOptions<T> & { module?: boolean, ecma?: number | string }} */
       (optionsAt(i));
@@ -561,6 +736,9 @@ async function minify(options) {
  * @returns {Promise<MinimizedResult>} minified result
  */
 async function transform(options) {
+  // Legacy worker path: the whole task (including minify function source) is a
+  // string evaluated here. Prefer `minify` when every `implementation` is a
+  // module path (`string` / `{ path, export }`) so the worker can `require` it.
   // 'use strict' => this === undefined (Clean Scope)
   // Safer for possible security issues, albeit not critical at all here
 
@@ -585,4 +763,11 @@ async function transform(options) {
   return minify(evaluatedOptions);
 }
 
-module.exports = { minify, transform };
+module.exports = {
+  canMinifyByPath,
+  canPassExtractCommentsWithoutSerialize,
+  getImplementationModuleRef,
+  loadImplementation,
+  minify,
+  transform,
+};
