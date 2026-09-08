@@ -631,7 +631,7 @@ describe("extractComments option", () => {
     expect(getWarnings(stats)).toMatchSnapshot("warnings");
   });
 
-  it("should merge comments when the existing licenses file is a Buffer", async () => {
+  it("should work with the existing licenses file, when it is a Buffer", async () => {
     new ExistingCommentsFile({ asBuffer: true }).apply(compiler);
     new MinimizerPlugin({
       extractComments: {
