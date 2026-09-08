@@ -1,13 +1,21 @@
 import webpack from "webpack";
 
 export default class ExistingCommentsFile {
+  // `asBuffer` mirrors plugins that emit a file read from disk, whose source is
+  // backed by a Buffer instead of a string.
+  constructor({ asBuffer = false } = {}) {
+    this.asBuffer = asBuffer;
+  }
+
   apply(compiler) {
     const plugin = { name: this.constructor.name };
 
     compiler.hooks.thisCompilation.tap(plugin, (compilation) => {
       compilation.hooks.additionalAssets.tap(plugin, () => {
+        const contents = "// Existing Comment";
+
         compilation.assets["licenses.txt"] = new webpack.sources.RawSource(
-          "// Existing Comment",
+          this.asBuffer ? Buffer.from(contents) : contents,
         );
       });
     });

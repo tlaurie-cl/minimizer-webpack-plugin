@@ -631,6 +631,28 @@ describe("extractComments option", () => {
     expect(getWarnings(stats)).toMatchSnapshot("warnings");
   });
 
+  it("should work with the existing licenses file backed by a buffer", async () => {
+    new ExistingCommentsFile({ asBuffer: true }).apply(compiler);
+    new MinimizerPlugin({
+      extractComments: {
+        filename: "licenses.txt",
+      },
+    }).apply(compiler);
+
+    const stats = await compile(compiler);
+
+    const licenses = readAsset("licenses.txt", compiler, stats);
+
+    // A plugin that emits a file it read from disk backs the asset with a
+    // Buffer, which reaches the merge the same way a string one does.
+    expect(licenses).toContain("// Existing Comment");
+    expect(licenses).toContain("/*! Legal Comment */");
+
+    expect(readsAssets(compiler, stats)).toMatchSnapshot("assets");
+    expect(getErrors(stats)).toMatchSnapshot("errors");
+    expect(getWarnings(stats)).toMatchSnapshot("warnings");
+  });
+
   it("should keep the comments of every asset sharing a file, when they are not adjacent", async () => {
     // Assets reach the comments file in name order, so `b` sits between the two
     // that share `shared.txt`.
@@ -662,5 +684,52 @@ describe("extractComments option", () => {
     expect(readsAssets(sharedCompiler, stats)).toMatchSnapshot("assets");
     expect(getErrors(stats)).toMatchSnapshot("errors");
     expect(getWarnings(stats)).toMatchSnapshot("warnings");
+  });
+
+  it("should not repeat a comment shared with an asset that has more than one", async () => {
+    // `a` contributes two comments, so the one it shares with `b` is not the
+    // last block of its source and does not carry the trailing newline.
+    const sharedCompiler = getCompiler({
+      entry: {
+        a: path.resolve(__dirname, "./fixtures/comments-3.js"),
+        b: path.resolve(__dirname, "./fixtures/comments-4.js"),
+      },
+    });
+
+    new MinimizerPlugin({
+      extractComments: { filename: "shared.txt" },
+    }).apply(sharedCompiler);
+
+    const stats = await compile(sharedCompiler);
+
+    const shared = readAsset("shared.txt", sharedCompiler, stats);
+    const repeated =
+      shared.match(/Duplicate comment in difference files\./g) || [];
+
+    expect(repeated).toHaveLength(1);
+  });
+
+  it("should keep comments that contain a blank line intact", async () => {
+    // Both comments share a paragraph, and `\n\n` separates the blocks the
+    // merge compares, so the shared paragraph must not be dropped from either.
+    const sharedCompiler = getCompiler({
+      entry: {
+        a: path.resolve(__dirname, "./fixtures/comments-blank-line.js"),
+        b: path.resolve(__dirname, "./fixtures/comments-blank-line-2.js"),
+      },
+    });
+
+    new MinimizerPlugin({
+      extractComments: { filename: "shared.txt" },
+    }).apply(sharedCompiler);
+
+    const stats = await compile(sharedCompiler);
+
+    const shared = readAsset("shared.txt", sharedCompiler, stats);
+
+    expect(shared).toContain("Copyright A");
+    expect(shared).toContain("Copyright B");
+    // Every extracted comment is still terminated.
+    expect(shared.match(/\*\//g)).toHaveLength(2);
   });
 });
